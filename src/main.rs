@@ -18,11 +18,18 @@ struct Args {
 
     #[arg(long, default_value_t = 16)]
     max_new_tokens: usize,
+
+    #[arg(long, default_value_t = true)]
+    stream: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let out = copper::run(&args.model_dir, &args.prompt, args.max_new_tokens)?;
-    println!("{out}");
+    if args.stream {
+        copper::run_stream(&args.model_dir, &args.prompt, args.max_new_tokens)?;
+    } else {
+        let out = copper::run(&args.model_dir, &args.prompt, args.max_new_tokens)?;
+        println!("{out}");
+    }
     Ok(())
 }

@@ -3,3 +3,4 @@ tests/fixtures/hf_gpt2.json
 
 
 models/
+.vscode

@@ -84,3 +84,30 @@ pub fn make_causal_mask(seq_len: usize, device: &Device, dtype: DType) -> Result
     }
     Tensor::from_vec(data, (1, 1, seq_len, seq_len), device).map_err(Into::into)
 }
+
+pub fn make_causal_mask_with_past(
+    past_len: usize,
+    cur_len: usize,
+    device: &Device,
+    dtype: DType,
+) -> Result<Tensor> {
+    if dtype != DType::F32 {
+        bail!(
+            "make_causal_mask_with_past only supports f32 dtype, got {:?}",
+            dtype
+        );
+    }
+    if cur_len == 0 {
+        bail!("cur_len must be > 0");
+    }
+    let total_len = past_len + cur_len;
+
+    let mut data = vec![0f32; cur_len * total_len];
+    for i in 0..cur_len {
+        let max_k = past_len + i;
+        for j in (max_k + 1)..total_len {
+            data[i * total_len + j] = -1e4;
+        }
+    }
+    Tensor::from_vec(data, (1, 1, cur_len, total_len), device).map_err(Into::into)
+}
