@@ -3,21 +3,22 @@ use candle_core::{DType, Device, Tensor};
 
 use crate::config::ModelSpec;
 use crate::loader::Gpt2Weights;
-use crate::model::cache::{KvCache, LayerKv};
+use crate::model::cache::KvCache;
 use crate::model::ops::{
-    gelu_new, layer_norm, linear_3d, make_causal_mask, make_causal_mask_with_past,
-    softmax_last_dim,
+    gelu_new, layer_norm, linear_3d, make_causal_mask, make_causal_mask_with_past, softmax_last_dim,
 };
 use crate::Runtime;
 
-pub mod ops;
 pub mod cache;
+pub mod ops;
 
 pub struct Gpt2 {
     spec: ModelSpec,
     w: Gpt2Weights,
     device: Device,
     dtype: DType,
+    wte_t: Tensor,
+    attn_scale: Tensor,
 }
 
 impl Gpt2 {
@@ -25,11 +26,24 @@ impl Gpt2 {
         if rt.dtype != DType::F32 {
             bail!("MVP supports only f32, got {:?}", rt.dtype);
         }
+        if !spec.n_embd.is_multiple_of(spec.n_head) {
+            bail!(
+                "n_embd {} not divisible by n_head {}",
+                spec.n_embd,
+                spec.n_head
+            );
+        }
+        let wte_t = w.wte_weight.transpose(0, 1)?.contiguous()?;
+        let head_dim = spec.n_embd / spec.n_head;
+        let attn_scale = Tensor::full((head_dim as f32).powf(-0.5), (), &rt.device)?;
+
         Ok(Self {
             spec,
             w,
             device: rt.device.clone(),
             dtype: rt.dtype,
+            wte_t,
+            attn_scale,
         })
     }
 
@@ -70,13 +84,6 @@ impl Gpt2 {
         let mask = make_causal_mask(seq_len, &self.device, self.dtype).context("causal mask")?;
 
         let head_dim = self.spec.n_embd / self.spec.n_head;
-        if self.spec.n_embd % self.spec.n_head != 0 {
-            bail!(
-                "n_embd {} not divisible by n_head {}",
-                self.spec.n_embd,
-                self.spec.n_head
-            );
-        }
 
         for (i, b) in self.w.blocks.iter().enumerate() {
             let ln1 = layer_norm(
@@ -114,11 +121,7 @@ impl Gpt2 {
             let scores = q
                 .matmul(&k_t)
                 .with_context(|| format!("block {i} attn matmul"))?
-                .broadcast_mul(&Tensor::full(
-                    (head_dim as f32).powf(-0.5),
-                    (),
-                    &self.device,
-                )?)
+                .broadcast_mul(&self.attn_scale)
                 .context("scale")?
                 .broadcast_add(&mask)
                 .context("mask add")?;
@@ -165,10 +168,9 @@ impl Gpt2 {
         )
         .context("ln_f")?;
 
-        let wte_t = self.w.wte_weight.transpose(0, 1)?.contiguous()?;
         let logits = x
             .reshape((seq_len, self.spec.n_embd))?
-            .matmul(&wte_t)?
+            .matmul(&self.wte_t)?
             .reshape((1, seq_len, self.spec.vocab_size))?;
         Ok(logits)
     }
@@ -195,6 +197,13 @@ impl Gpt2 {
                 "KvCache layer count mismatch: cache has {} layers, model has {}",
                 cache.layers.len(),
                 self.spec.n_layer
+            );
+        }
+        if cache.n_ctx() != self.spec.n_ctx {
+            bail!(
+                "KvCache n_ctx mismatch: cache has {}, model has {}",
+                cache.n_ctx(),
+                self.spec.n_ctx
             );
         }
 
@@ -224,17 +233,9 @@ impl Gpt2 {
         let mut x = tok_emb.add(&pos_emb).context("emb add")?;
 
         let head_dim = self.spec.n_embd / self.spec.n_head;
-        if self.spec.n_embd % self.spec.n_head != 0 {
-            bail!(
-                "n_embd {} not divisible by n_head {}",
-                self.spec.n_embd,
-                self.spec.n_head
-            );
-        }
 
         let mask = make_causal_mask_with_past(past_len, cur_len, &self.device, self.dtype)
             .context("causal mask with past")?;
-        let scale = Tensor::full((head_dim as f32).powf(-0.5), (), &self.device)?;
 
         for (i, b) in self.w.blocks.iter().enumerate() {
             let ln1 = layer_norm(
@@ -269,25 +270,18 @@ impl Gpt2 {
                 .transpose(1, 2)?
                 .contiguous()?;
 
-            let (k_total, v_total) = match &cache.layers[i] {
-                None => (k_new.clone(), v_new.clone()),
-                Some(prev) => {
-                    let k_cat = Tensor::cat(&[&prev.k, &k_new], 2)?;
-                    let v_cat = Tensor::cat(&[&prev.v, &v_new], 2)?;
-                    (k_cat, v_cat)
-                }
-            };
-
-            cache.layers[i] = Some(LayerKv {
-                k: k_total.clone(),
-                v: v_total.clone(),
-            });
+            cache.layers[i]
+                .append(&k_new, &v_new, past_len)
+                .with_context(|| format!("block {i} append cache"))?;
+            let (k_total, v_total) = cache.layers[i]
+                .materialize(total_len, &self.device)
+                .with_context(|| format!("block {i} materialize cache"))?;
 
             let k_t = k_total.transpose(2, 3)?.contiguous()?;
             let scores = q
                 .matmul(&k_t)
                 .with_context(|| format!("block {i} attn matmul"))?
-                .broadcast_mul(&scale)
+                .broadcast_mul(&self.attn_scale)
                 .context("scale")?
                 .broadcast_add(&mask)
                 .context("mask add")?;
@@ -334,10 +328,9 @@ impl Gpt2 {
         )
         .context("ln_f")?;
 
-        let wte_t = self.w.wte_weight.transpose(0, 1)?.contiguous()?;
         let logits = x
             .reshape((cur_len, self.spec.n_embd))?
-            .matmul(&wte_t)?
+            .matmul(&self.wte_t)?
             .reshape((1, cur_len, self.spec.vocab_size))?;
 
         cache.past_len = total_len;
@@ -346,5 +339,15 @@ impl Gpt2 {
 
     pub fn n_layer(&self) -> usize {
         self.spec.n_layer
+    }
+
+    pub fn new_kv_cache(&self) -> KvCache {
+        let head_dim = self.spec.n_embd / self.spec.n_head;
+        KvCache::new(
+            self.spec.n_layer,
+            self.spec.n_head,
+            self.spec.n_ctx,
+            head_dim,
+        )
     }
 }

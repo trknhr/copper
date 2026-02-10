@@ -111,7 +111,10 @@ pub fn load_gpt2_weights(model_dir: &Path, rt: &Runtime) -> Result<Gpt2Weights> 
     }
 
     let spec = crate::config::load_model_spec(model_dir).context("load config.json for shapes")?;
-    let st = load_safetensors(model_dir)?;
+    let file = find_single_safetensors(model_dir)?;
+    let f = std::fs::File::open(&file).with_context(|| format!("open {file:?}"))?;
+    let mmap = unsafe { Mmap::map(&f).with_context(|| format!("mmap {file:?}"))? };
+    let st = SafeTensors::deserialize(&mmap).context("deserialize safetensors")?;
     let ks = KeyResolver::infer(&st).context("infer safetensors key style")?;
 
     let wte_weight = get_f32(
@@ -258,14 +261,6 @@ pub fn load_gpt2_weights(model_dir: &Path, rt: &Runtime) -> Result<Gpt2Weights> 
     })
 }
 
-fn load_safetensors(model_dir: &Path) -> Result<SafeTensors<'static>> {
-    let file = find_single_safetensors(model_dir)?;
-    let f = std::fs::File::open(&file).with_context(|| format!("open {file:?}"))?;
-    let mmap = unsafe { Mmap::map(&f).with_context(|| format!("mmap {file:?}"))? };
-    let bytes: &'static [u8] = Box::leak(mmap[..].to_vec().into_boxed_slice());
-    SafeTensors::deserialize(bytes).context("deserialize safetensors")
-}
-
 fn find_single_safetensors(model_dir: &Path) -> Result<PathBuf> {
     let candidate = model_dir.join("model.safetensors");
     if candidate.exists() {
@@ -323,7 +318,7 @@ fn tensor_view_to_candle_f32(
         bail!("tensor {name} has shape {actual:?}, expected {expected:?}");
     }
     let bytes = t.data();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         bail!(
             "tensor {name} has invalid byte length {} for f32 data",
             bytes.len()
@@ -338,4 +333,28 @@ fn tensor_view_to_candle_f32(
 
 pub fn load_model_spec(model_dir: &Path) -> Result<ModelSpec> {
     crate::config::load_model_spec(model_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn missing_safetensors_is_error() {
+        let dir = tempdir().expect("tempdir");
+        let err = find_single_safetensors(dir.path()).expect_err("should fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no .safetensors found"));
+    }
+
+    #[test]
+    fn multiple_safetensors_is_error() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.safetensors"), b"").expect("write a");
+        std::fs::write(dir.path().join("b.safetensors"), b"").expect("write b");
+        let err = find_single_safetensors(dir.path()).expect_err("should fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("multiple .safetensors found"));
+    }
 }

@@ -3,6 +3,7 @@ mod common;
 use anyhow::{bail, Result};
 
 #[test]
+#[ignore = "requires local GPT-2 model and HF fixture"]
 fn prefill_last_token_logits_close_to_hf() -> Result<()> {
     let Some(model_dir) = common::maybe_model_dir() else {
         eprintln!("SKIP: set COPPER_MODEL_DIR to a local GPT-2 directory to run this test");

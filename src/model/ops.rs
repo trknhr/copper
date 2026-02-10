@@ -60,7 +60,7 @@ pub fn gelu_new(x: &Tensor) -> Result<Tensor> {
     let x3 = x.mul(x)?.mul(x)?;
     let a = Tensor::full(0.044715_f32, (), x.device())?;
     let inner = x.add(&x3.broadcast_mul(&a)?)?;
-    let c = Tensor::full(0.79788456_f32, (), x.device())?; // sqrt(2/pi)
+    let c = Tensor::full(0.797_884_6_f32, (), x.device())?; // sqrt(2/pi)
     let tanh = inner.broadcast_mul(&c)?.tanh()?;
     let one = Tensor::full(1f32, (), x.device())?;
     let half = Tensor::full(0.5_f32, (), x.device())?;
@@ -110,4 +110,49 @@ pub fn make_causal_mask_with_past(
         }
     }
     Tensor::from_vec(data, (1, 1, cur_len, total_len), device).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn causal_mask_blocks_future_positions() -> Result<()> {
+        let mask = make_causal_mask(4, &Device::Cpu, DType::F32)?;
+        let v: Vec<f32> = mask.flatten_all()?.to_vec1()?;
+        assert_eq!(v.len(), 16);
+        assert_eq!(v[0], 0.0);
+        assert_eq!(v[1], -1e4);
+        assert_eq!(v[5], 0.0);
+        assert_eq!(v[15], 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn causal_mask_with_past_cur_1() -> Result<()> {
+        let mask = make_causal_mask_with_past(3, 1, &Device::Cpu, DType::F32)?;
+        let v: Vec<f32> = mask.flatten_all()?.to_vec1()?;
+        assert_eq!(v, vec![0.0, 0.0, 0.0, 0.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn causal_mask_with_past_cur_multi() -> Result<()> {
+        let mask = make_causal_mask_with_past(2, 2, &Device::Cpu, DType::F32)?;
+        let v: Vec<f32> = mask.flatten_all()?.to_vec1()?;
+        assert_eq!(v, vec![0.0, 0.0, 0.0, -1e4, 0.0, 0.0, 0.0, 0.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn linear_3d_rejects_shape_mismatch() -> Result<()> {
+        let device = Device::Cpu;
+        let x = Tensor::zeros((1, 2, 3), DType::F32, &device)?;
+        let w = Tensor::zeros((4, 5), DType::F32, &device)?;
+        let b = Tensor::zeros((5,), DType::F32, &device)?;
+        let err = linear_3d(&x, &w, &b).expect_err("should fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("weight in_dim mismatch"));
+        Ok(())
+    }
 }

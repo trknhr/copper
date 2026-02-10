@@ -7,6 +7,8 @@ pub mod tokenizer;
 use anyhow::{Context, Result};
 use candle_core::{DType, Device};
 use std::io::Write;
+use std::path::Path;
+use tracing::debug;
 
 pub struct Runtime {
     pub device: Device,
@@ -22,17 +24,19 @@ impl Runtime {
     }
 }
 
-pub fn run(model_dir: &std::path::Path, prompt: &str, max_new_tokens: usize) -> Result<String> {
+fn init(model_dir: &Path) -> Result<(Runtime, tokenizer::Gpt2Tokenizer, model::Gpt2)> {
     let rt = Runtime::cpu_f32();
-
     let spec = config::load_model_spec(model_dir).context("load config.json")?;
-    eprintln!("ModelSpec: {spec:?}");
-
+    debug!(?spec, "loaded model spec");
     let tokenizer = tokenizer::load_tokenizer(model_dir).context("load tokenizer")?;
-    let mut ids = tokenizer.encode(prompt).context("tokenize prompt")?;
-
     let weights = loader::load_gpt2_weights(model_dir, &rt).context("load weights")?;
     let model = model::Gpt2::new(spec, weights, &rt).context("build model")?;
+    Ok((rt, tokenizer, model))
+}
+
+pub fn run(model_dir: &Path, prompt: &str, max_new_tokens: usize) -> Result<String> {
+    let (_rt, tokenizer, model) = init(model_dir)?;
+    let mut ids = tokenizer.encode(prompt).context("tokenize prompt")?;
 
     generate::greedy_generate_cached(&model, &tokenizer, &mut ids, max_new_tokens)
         .context("generate")?;
@@ -40,21 +44,9 @@ pub fn run(model_dir: &std::path::Path, prompt: &str, max_new_tokens: usize) -> 
     tokenizer.decode(&ids).context("decode")
 }
 
-pub fn run_stream(
-    model_dir: &std::path::Path,
-    prompt: &str,
-    max_new_tokens: usize,
-) -> Result<()> {
-    let rt = Runtime::cpu_f32();
-
-    let spec = config::load_model_spec(model_dir).context("load config.json")?;
-    eprintln!("ModelSpec: {spec:?}");
-
-    let tokenizer = tokenizer::load_tokenizer(model_dir).context("load tokenizer")?;
+pub fn run_stream(model_dir: &Path, prompt: &str, max_new_tokens: usize) -> Result<()> {
+    let (_rt, tokenizer, model) = init(model_dir)?;
     let mut ids = tokenizer.encode(prompt).context("tokenize prompt")?;
-
-    let weights = loader::load_gpt2_weights(model_dir, &rt).context("load weights")?;
-    let model = model::Gpt2::new(spec, weights, &rt).context("build model")?;
 
     let mut out = std::io::stdout();
     write!(out, "{prompt}").context("write prompt")?;

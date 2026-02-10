@@ -2,13 +2,12 @@ use anyhow::{Context, Result};
 
 use std::io::Write;
 
-use crate::model::cache::KvCache;
 use crate::model::Gpt2;
 use crate::tokenizer::Gpt2Tokenizer;
 
 pub fn greedy_generate(
     model: &Gpt2,
-    tokenizer: &Gpt2Tokenizer,
+    _tokenizer: &Gpt2Tokenizer,
     input_ids: &mut Vec<u32>,
     max_new_tokens: usize,
 ) -> Result<()> {
@@ -26,22 +25,20 @@ pub fn greedy_generate(
         let v: Vec<f32> = last.to_vec1().context("logits to_vec1")?;
         input_ids.push(argmax(&v));
     }
-    let _ = tokenizer; // keep signature stable for future streaming hooks
     Ok(())
 }
 
 pub fn greedy_generate_cached(
     model: &Gpt2,
-    tokenizer: &Gpt2Tokenizer,
+    _tokenizer: &Gpt2Tokenizer,
     input_ids: &mut Vec<u32>,
     max_new_tokens: usize,
 ) -> Result<()> {
     if max_new_tokens == 0 {
-        let _ = tokenizer;
         return Ok(());
     }
 
-    let mut cache = KvCache::new(model.n_layer());
+    let mut cache = model.new_kv_cache();
 
     let logits = model
         .forward_cached(input_ids, &mut cache)
@@ -72,7 +69,6 @@ pub fn greedy_generate_cached(
         input_ids.push(next_id);
     }
 
-    let _ = tokenizer;
     Ok(())
 }
 
@@ -87,7 +83,7 @@ pub fn greedy_generate_cached_stream(
         return Ok(());
     }
 
-    let mut cache = KvCache::new(model.n_layer());
+    let mut cache = model.new_kv_cache();
 
     let logits = model
         .forward_cached(input_ids, &mut cache)

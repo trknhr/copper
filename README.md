@@ -13,10 +13,30 @@ Requires a local GPT-2 directory containing at least:
 Example:
 
 ```bash
-cargo run -- --model-dir /path/to/gpt2 --prompt "Hello" --max-new-tokens 16
+cargo run -- --model-dir /path/to/gpt2 --prompt "Hello" --max-new-tokens 16 --output stream
 ```
 
-## HF match tests (fixtures)
+Use buffered output instead:
+
+```bash
+cargo run -- --model-dir /path/to/gpt2 --prompt "Hello" --output buffered
+```
+
+Set logging level:
+
+```bash
+cargo run -- --model-dir /path/to/gpt2 --prompt "Hello" --log-level debug
+```
+
+## Quality checks
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --lib --bins
+```
+
+## HF parity tests (fixtures)
 
 1. Generate fixture JSON (requires `transformers` + `torch`):
 
@@ -24,9 +44,8 @@ cargo run -- --model-dir /path/to/gpt2 --prompt "Hello" --max-new-tokens 16
 python3 scripts/export_hf_fixtures.py --model-dir /path/to/gpt2
 ```
 
-2. Run tests:
+2. Run ignored HF parity tests:
 
 ```bash
-COPPER_MODEL_DIR=/path/to/gpt2 cargo test
+COPPER_MODEL_DIR=/path/to/gpt2 cargo test -- --ignored
 ```
-
