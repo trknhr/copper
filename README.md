@@ -28,6 +28,12 @@ Set logging level:
 cargo run -- --model-dir /path/to/gpt2 --prompt "Hello" --log-level debug
 ```
 
+Start interactive chat mode:
+
+```bash
+cargo run -- --model-dir /path/to/gpt2 --chat --max-new-tokens 64 --output stream
+```
+
 ## Quality checks
 
 ```bash

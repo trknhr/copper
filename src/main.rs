@@ -14,8 +14,11 @@ struct Args {
     #[arg(long)]
     model_dir: PathBuf,
 
-    #[arg(long)]
-    prompt: String,
+    #[arg(long, required_unless_present = "chat", conflicts_with = "chat")]
+    prompt: Option<String>,
+
+    #[arg(long, default_value_t = false)]
+    chat: bool,
 
     #[arg(long, default_value_t = 16)]
     max_new_tokens: usize,
@@ -61,13 +64,22 @@ fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    match args.output {
-        OutputMode::Stream => {
-            copper::run_stream(&args.model_dir, &args.prompt, args.max_new_tokens)?;
-        }
-        OutputMode::Buffered => {
-            let out = copper::run(&args.model_dir, &args.prompt, args.max_new_tokens)?;
-            println!("{out}");
+    if args.chat {
+        copper::run_chat(
+            &args.model_dir,
+            args.max_new_tokens,
+            matches!(args.output, OutputMode::Stream),
+        )?;
+    } else {
+        let prompt = args.prompt.as_deref().expect("clap ensures prompt exists");
+        match args.output {
+            OutputMode::Stream => {
+                copper::run_stream(&args.model_dir, prompt, args.max_new_tokens)?;
+            }
+            OutputMode::Buffered => {
+                let out = copper::run(&args.model_dir, prompt, args.max_new_tokens)?;
+                println!("{out}");
+            }
         }
     }
     Ok(())
@@ -105,6 +117,21 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_chat_mode_without_prompt() {
+        let chat = Args::try_parse_from([
+            "copper",
+            "--model-dir",
+            "/tmp/gpt2",
+            "--chat",
+            "--output",
+            "stream",
+        ])
+        .expect("chat mode should parse");
+        assert!(chat.chat);
+        assert!(chat.prompt.is_none());
+    }
+
+    #[test]
     fn cli_rejects_invalid_output_mode() {
         let bad = Args::try_parse_from([
             "copper",
@@ -116,5 +143,25 @@ mod tests {
             "invalid",
         ]);
         assert!(bad.is_err());
+    }
+
+    #[test]
+    fn cli_requires_prompt_when_not_chat() {
+        let missing_prompt =
+            Args::try_parse_from(["copper", "--model-dir", "/tmp/gpt2", "--output", "stream"]);
+        assert!(missing_prompt.is_err());
+    }
+
+    #[test]
+    fn cli_rejects_prompt_and_chat_together() {
+        let both = Args::try_parse_from([
+            "copper",
+            "--model-dir",
+            "/tmp/gpt2",
+            "--chat",
+            "--prompt",
+            "hello",
+        ]);
+        assert!(both.is_err());
     }
 }

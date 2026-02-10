@@ -3,7 +3,7 @@ use candle_core::{DType, Device, Tensor};
 
 use crate::config::ModelSpec;
 use crate::loader::Gpt2Weights;
-use crate::model::cache::KvCache;
+use crate::model::cache::{KvCache, LayerKv};
 use crate::model::ops::{
     gelu_new, layer_norm, linear_3d, make_causal_mask, make_causal_mask_with_past, softmax_last_dim,
 };
@@ -199,14 +199,6 @@ impl Gpt2 {
                 self.spec.n_layer
             );
         }
-        if cache.n_ctx() != self.spec.n_ctx {
-            bail!(
-                "KvCache n_ctx mismatch: cache has {}, model has {}",
-                cache.n_ctx(),
-                self.spec.n_ctx
-            );
-        }
-
         let ids = Tensor::from_vec(input_ids.to_vec(), (1, cur_len), &self.device)
             .context("create input_ids tensor")?;
 
@@ -270,12 +262,19 @@ impl Gpt2 {
                 .transpose(1, 2)?
                 .contiguous()?;
 
-            cache.layers[i]
-                .append(&k_new, &v_new, past_len)
-                .with_context(|| format!("block {i} append cache"))?;
-            let (k_total, v_total) = cache.layers[i]
-                .materialize(total_len, &self.device)
-                .with_context(|| format!("block {i} materialize cache"))?;
+            let (k_total, v_total) = match &cache.layers[i] {
+                None => (k_new.clone(), v_new.clone()),
+                Some(prev) => {
+                    let k_cat = Tensor::cat(&[&prev.k, &k_new], 2)?;
+                    let v_cat = Tensor::cat(&[&prev.v, &v_new], 2)?;
+                    (k_cat, v_cat)
+                }
+            };
+
+            cache.layers[i] = Some(LayerKv {
+                k: k_total.clone(),
+                v: v_total.clone(),
+            });
 
             let k_t = k_total.transpose(2, 3)?.contiguous()?;
             let scores = q
@@ -342,12 +341,10 @@ impl Gpt2 {
     }
 
     pub fn new_kv_cache(&self) -> KvCache {
-        let head_dim = self.spec.n_embd / self.spec.n_head;
-        KvCache::new(
-            self.spec.n_layer,
-            self.spec.n_head,
-            self.spec.n_ctx,
-            head_dim,
-        )
+        KvCache::new(self.spec.n_layer)
+    }
+
+    pub fn n_ctx(&self) -> usize {
+        self.spec.n_ctx
     }
 }
